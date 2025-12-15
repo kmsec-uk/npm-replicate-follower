@@ -1,4 +1,4 @@
-package follower
+package couch
 
 import (
 	"context"
@@ -17,6 +17,16 @@ type CouchDocumentChange struct {
 	ID      string          `json:"id"`
 	Changes []CouchRevision `json:"changes"`
 	Deleted bool            `json:"deleted,omitempty"`
+}
+
+// check if a specific revision is present in the list of changes from CouchDB
+func (c CouchDocumentChange) HasRevision(rev string) bool {
+	for _, change := range c.Changes {
+		if change.Rev == rev {
+			return true
+		}
+	}
+	return false
 }
 
 type CouchRevision struct {
@@ -66,30 +76,42 @@ func (s *Follower) WithUserAgent(ua string) *Follower {
 	return s
 }
 
-// sets the http client timeout in seconds
+// sets the http client timeout to a given time.Duration.
 func (s *Follower) WithClientTimeout(t time.Duration) *Follower {
 	s.Client.Timeout = t
 	return s
 }
 
+// set the polling interval for the follower. Default is 2 seconds
+// which is more than frequent enough to capture all events
 func (s *Follower) WithPollingInterval(t time.Duration) *Follower {
 	s.pollingInterval = t
 	return s
 }
 
-// connect from cold start
+// optionally start from a given sequence as uint64 -- otherwise
+// Follower starts from current (most recent) sequence
+func (s *Follower) Since(sequence uint64) *Follower {
+	s.Sequence.Store(sequence)
+	return s
+}
+
+// connect and start issuing Results to channel.
 func (s *Follower) Connect(ctx context.Context) <-chan Result {
 
 	out := make(chan Result, 10)
-	err := s.coldStartSequence(ctx)
-	if err != nil {
-		// Send the error and then close the channel, signaling immediate failure.
-		go func() {
-			out <- Result{Error: fmt.Errorf("cold start failed: %w", err)}
-			close(out)
-		}()
-		return out
+	// if we haven't been given a sequence to start with, do cold start
+	if s.Sequence.Load() == 0 {
+		err := s.coldStartSequence(ctx)
+		if err != nil {
+			go func() {
+				out <- Result{Error: fmt.Errorf("cold start failed: %w", err)}
+				close(out)
+			}()
+			return out
+		}
 	}
+
 	go func() {
 		defer close(out)
 		ticker := time.NewTicker(s.pollingInterval)
@@ -119,6 +141,7 @@ func (s *Follower) Connect(ctx context.Context) <-chan Result {
 			}
 
 		}
+
 		fetch()
 		for {
 			select {
@@ -137,7 +160,7 @@ func (s *Follower) Connect(ctx context.Context) <-chan Result {
 func (s *Follower) getChanges(ctx context.Context) ([]CouchDocumentChange, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", replicateRegistry+"_changes", nil)
 	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
+		return nil, fmt.Errorf("sequence %v: creating request: %w", s.Sequence.Load(), err)
 	}
 	// user-agent
 	req.Header.Add("user-agent", s.userAgent)
@@ -148,17 +171,17 @@ func (s *Follower) getChanges(ctx context.Context) ([]CouchDocumentChange, error
 
 	res, err := s.Client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("doing request: %w", err)
+		return nil, fmt.Errorf("sequence %v: doing request: %w", s.Sequence.Load(), err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("unexpected status %v from %s", res.StatusCode, res.Request.URL)
+		return nil, fmt.Errorf("sequence %v: unexpected status %v from %s", s.Sequence.Load(), res.StatusCode, res.Request.URL)
 	}
 	var cr CouchResponse
 	err = json.NewDecoder(res.Body).Decode(&cr)
-	fmt.Printf("got %d updates", len(cr.Results))
+	// fmt.Printf("got %d updates", len(cr.Results))
 	if err != nil {
-		return nil, fmt.Errorf("decoding body: %w", err)
+		return nil, fmt.Errorf("sequence %v: decoding body: %w", s.Sequence.Load(), err)
 	}
 	// update sequence
 	_ = s.Sequence.Swap(cr.LastSequence)
@@ -167,7 +190,6 @@ func (s *Follower) getChanges(ctx context.Context) ([]CouchDocumentChange, error
 
 // sets the sequence for CouchDB from a cold start.
 // gets the most recent sequence to begin scraping.
-// TODO: (?) maybe implement some kind of backfill from specific sequence.
 func (s *Follower) coldStartSequence(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", replicateRegistry, nil)
 	if err != nil {
