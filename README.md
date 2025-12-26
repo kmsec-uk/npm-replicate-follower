@@ -1,6 +1,10 @@
 # npm feed follower
 
-golang library for following updates to the npm registry via the CouchDB API (replicate.npmjs.com/registry/_changes).
+golang library for interacting with npm registry and for following CouchDB _changes API (replicate.npmjs.com/registry/_changes).
+
+* a Follower that issues package updates to a Go channel.
+* utilities for getting Packuments from the registry for a given package. See `/registry/`
+* (not really supported but included) RSS feed follower
 
 Designed to be simple to setup and start receiving events through a channel:
 
@@ -11,7 +15,7 @@ import (
 	"context"
 	"log"
 
-	"github.com/kmsec-uk/npm-replicate-follower/couch"
+	"github.com/kmsec-uk/npm-follower/couch"
 )
 
 func main() {
@@ -93,13 +97,16 @@ The Follower comes with builder-style configuration:
 ```go
 f := couch.NewFollower()
     .WithUserAgent("my-useragent") // your user-agent here
-    .WithPollingInterval(10 * time.Second) // interval to GET _changes
-    .WithClientTimeout(15 * time.Second) // http.Client timeout.
     .Since(<uint64>) // if you want to connect from a specific sequence
+
+// the embedded registry.Client can also be manipulated (cannot be chained 
+// together with the follower configuration above - must be separate)
+f.WithPollingInterval(10 * time.Second) // interval to GET _changes
+    .WithHTTPTimeout(15 * time.Second) // http.Client timeout.
 for event := range f.Connect(ctx) {...}
 ```
 
-## Replication challenges and known issues
+## Update lag / replication race
 
 The CouchDB _changes API exposes specific change IDs (`_rev` property) that represent the unique revision of the document (npm package).
 
@@ -208,3 +215,56 @@ func main() {
 ```
 
 On top of replication unreliability, while I've made a best-effort attempt to create a Packument unmarshaler, there really isn't much of a strict standard and they come in all shapes and sizes. Therefore, you may hit unmarshalling issues. In cases where you must not face unmarshalling errors, use the Fetch* utility functions, which return the response.Body for you to use as-is.
+
+## RSS feed (not recommended)
+
+The npm rss feed at `https://registry.npmjs.org/-/rss` at first feels like a good alternative to the _changes feed, as it provides the publisher name and publish date as well. However (as with all things with npm as I'm starting to learn) there are undocumented caveats!
+
+* The RSS feed comes with (as of Dec 2025) a 60 second time to live (TTL), which means repeated polling within a 60 second window will **return the same data**. You must **long poll** the feed to not waste network bandwidth.
+* Closely linked to the above point, there is an (unknown, undocumented, untested) upper limit to how much data you can return. While there is a supported `limit` parameter (https://registry.npmjs.org/-/rss?descending=true&**limit=100**) to receive up to the designated number of updates, it will periodically fail when getting upwards of 500 events at a time. That means, if more changes have occured in a 60 second window than your arbitrarily set upper bound, **you will miss updates**.
+* The publish date issued by the RSS feed is for the *latest* version - which is a tagged release that may not correspond to the chronologically latest release. For example, someone will publish `3.0.1-beta3`, which will trigger an inclusion in the RSS feed, however the publish date of the `latest` dist-tag of `2.9.1` will be in the RSS feed. This leads to misleading data.
+* Compounding the above issue of misleading dates -- even when the `latest` dist-tag is updated and triggers an inclusion in the RSS, spot checking identified intermittent inaccuracies where *previous version release dates were being included instead of the real latest date*. This issue leads me to believe that npm are themselves running into the update lag / replication race mentioned above.
+
+You have been warned! Should you still wish to embrace chaos in the RSS follower from this library see the example in `cmd/rss/main.go`:
+
+```go
+package main
+
+import (
+	"context"
+	"log"
+	"time"
+
+	"github.com/kmsec-uk/npm-follower/rss"
+)
+
+func main() {
+	ctx := context.Background()
+	// giving the RSS feed a 2 second buffer (62 second interval) is a
+	// good way to ensure we poll the next change correctly.
+	// I recommend experimenting pushing the limit parameter higher to
+	// find a balance between context timeout, feed generation error,
+	// and receiving enough events
+	f := rss.NewFollower().WithPollingInterval(62 * time.Second).WithLimit(100)
+	// set a reasonable timeout since RSS is slow to generate
+	f.WithHTTPTimeout(5 * time.Second)
+	for result := range f.Connect(ctx) {
+		if err := result.Error; err != nil {
+			log.Println(err)
+			continue
+		}
+		log.Println(result.FeedItem.String())
+	}
+}
+```
+
+The output will look like this:
+
+```
+2025/12/26 11:08:06 quidproquo-actionprocessor-node updated by joecoady - the `latest` dist-tag was released on Fri, 26 Dec 2025 11:07:05 GMT
+2025/12/26 11:08:06 quidproquo-actionprocessor-awslambda updated by joecoady - the `latest` dist-tag was released on Fri, 26 Dec 2025 11:07:08 GMT
+2025/12/26 11:08:06 quidproquo-neo4j updated by joecoady - the `latest` dist-tag was released on Fri, 26 Dec 2025 11:07:09 GMT
+2025/12/26 11:08:06 ouml updated by smlsvnssn - the `latest` dist-tag was released on Fri, 26 Dec 2025 11:07:10 GMT
+```
+
+The .String() function for RSS items is intentionally verbose to highlight the quirks above.

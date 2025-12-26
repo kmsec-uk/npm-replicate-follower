@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"sync/atomic"
 	"time"
+
+	"github.com/kmsec-uk/npm-follower/registry"
 )
 
 type CouchDocumentChange struct {
@@ -27,6 +29,7 @@ func (c CouchDocumentChange) HasRevision(rev string) bool {
 		}
 	}
 	return false
+
 }
 
 type CouchRevision struct {
@@ -45,16 +48,17 @@ type Result struct {
 }
 
 type Follower struct {
-	Client          *http.Client
+	*registry.RegistryClient
+	// Client          *http.Client
+	// userAgent       string
+
 	Sequence        atomic.Uint64
-	userAgent       string
 	pollingInterval time.Duration
 }
 
 var ErrInvalidUpdateSequence error = errors.New("invalid update sequence")
 
 const (
-	defaultUserAgent  string = "npm-replicate-client (go)"
 	replicateRegistry string = "https://replicate.npmjs.com/registry/"
 )
 
@@ -62,47 +66,44 @@ const (
 // by default, the follower excludes deletion events
 func NewFollower() *Follower {
 	return &Follower{
-		Client: &http.Client{
-			Timeout: 5 * time.Second,
-		},
-		userAgent:       defaultUserAgent,
+		RegistryClient:  registry.NewClient(),
 		pollingInterval: 2 * time.Second,
 	}
 }
 
-// use a custom user agent
-func (s *Follower) WithUserAgent(ua string) *Follower {
-	s.userAgent = ua
-	return s
-}
+// // use a custom user agent
+// func (f *Follower) WithUserAgent(ua string) *Follower {
+// 	f.UserAgent = ua
+// 	return f
+// }
 
 // sets the http client timeout to a given time.Duration.
-func (s *Follower) WithClientTimeout(t time.Duration) *Follower {
-	s.Client.Timeout = t
-	return s
+func (f *Follower) WithHTTPTimeout(t time.Duration) *Follower {
+	f.RegistryClient = f.RegistryClient.WithHTTPTimeout(t)
+	return f
 }
 
 // set the polling interval for the follower. Default is 2 seconds
 // which is more than frequent enough to capture all events
-func (s *Follower) WithPollingInterval(t time.Duration) *Follower {
-	s.pollingInterval = t
-	return s
+func (f *Follower) WithPollingInterval(t time.Duration) *Follower {
+	f.pollingInterval = t
+	return f
 }
 
 // optionally start from a given sequence as uint64 -- otherwise
 // Follower starts from current (most recent) sequence
-func (s *Follower) Since(sequence uint64) *Follower {
-	s.Sequence.Store(sequence)
-	return s
+func (f *Follower) Since(sequence uint64) *Follower {
+	f.Sequence.Store(sequence)
+	return f
 }
 
 // connect and start issuing Results to channel.
-func (s *Follower) Connect(ctx context.Context) <-chan Result {
+func (f *Follower) Connect(ctx context.Context) <-chan Result {
 
 	out := make(chan Result, 10)
 	// if we haven't been given a sequence to start with, do cold start
-	if s.Sequence.Load() == 0 {
-		err := s.coldStartSequence(ctx)
+	if f.Sequence.Load() == 0 {
+		err := f.coldStartSequence(ctx)
 		if err != nil {
 			go func() {
 				out <- Result{Error: fmt.Errorf("cold start failed: %w", err)}
@@ -114,15 +115,15 @@ func (s *Follower) Connect(ctx context.Context) <-chan Result {
 
 	go func() {
 		defer close(out)
-		ticker := time.NewTicker(s.pollingInterval)
+		ticker := time.NewTicker(f.pollingInterval)
 		defer ticker.Stop()
 
 		fetch := func() {
-			// hard-stop 5 second context timeout
-			reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			// hard-stop 10 second context timeout
+			reqCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
 
-			changes, err := s.getChanges(reqCtx)
+			changes, err := f.getChanges(reqCtx)
 			if err != nil {
 				select {
 				case out <- Result{Error: err}:
@@ -157,48 +158,48 @@ func (s *Follower) Connect(ctx context.Context) <-chan Result {
 
 // get changes from _changes and return the whole couch result body.
 // the sequence is updated in this func
-func (s *Follower) getChanges(ctx context.Context) ([]CouchDocumentChange, error) {
+func (f *Follower) getChanges(ctx context.Context) ([]CouchDocumentChange, error) {
 	req, err := http.NewRequestWithContext(ctx, "GET", replicateRegistry+"_changes", nil)
 	if err != nil {
-		return nil, fmt.Errorf("sequence %v: creating request: %w", s.Sequence.Load(), err)
+		return nil, fmt.Errorf("sequence %v: creating request: %w", f.Sequence.Load(), err)
 	}
 	// user-agent
-	req.Header.Add("user-agent", s.userAgent)
+	req.Header.Add("user-agent", f.UserAgent)
 	// sequence
 	q := req.URL.Query()
-	q.Add("since", strconv.FormatUint(s.Sequence.Load(), 10))
+	q.Add("since", strconv.FormatUint(f.Sequence.Load(), 10))
 	req.URL.RawQuery = q.Encode()
 
-	res, err := s.Client.Do(req)
+	res, err := f.Client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("sequence %v: doing request: %w", s.Sequence.Load(), err)
+		return nil, fmt.Errorf("sequence %v: doing request: %w", f.Sequence.Load(), err)
 	}
 	defer res.Body.Close()
 	if res.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("sequence %v: unexpected status %v from %s", s.Sequence.Load(), res.StatusCode, res.Request.URL)
+		return nil, fmt.Errorf("sequence %v: unexpected status %v from %s", f.Sequence.Load(), res.StatusCode, res.Request.URL)
 	}
 	var cr CouchResponse
 	err = json.NewDecoder(res.Body).Decode(&cr)
 	// fmt.Printf("got %d updates", len(cr.Results))
 	if err != nil {
-		return nil, fmt.Errorf("sequence %v: decoding body: %w", s.Sequence.Load(), err)
+		return nil, fmt.Errorf("sequence %v: decoding body: %w", f.Sequence.Load(), err)
 	}
 	// update sequence
-	_ = s.Sequence.Swap(cr.LastSequence)
+	_ = f.Sequence.Swap(cr.LastSequence)
 	return cr.Results, nil
 }
 
 // sets the sequence for CouchDB from a cold start.
-// gets the most recent sequence to begin scraping.
-func (s *Follower) coldStartSequence(ctx context.Context) error {
+// gets the most recent sequence to begin following.
+func (f *Follower) coldStartSequence(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, "GET", replicateRegistry, nil)
 	if err != nil {
 		return fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Add(
-		"user-agent", s.userAgent,
+		"user-agent", f.UserAgent,
 	)
-	res, err := s.Client.Do(req)
+	res, err := f.Client.Do(req)
 	if err != nil {
 		return fmt.Errorf("doing request: %w", err)
 	}
@@ -218,7 +219,7 @@ func (s *Follower) coldStartSequence(ctx context.Context) error {
 		return ErrInvalidUpdateSequence
 	}
 
-	s.Sequence.Store(body.UpdateSequence)
+	f.Sequence.Store(body.UpdateSequence)
 	log.Printf("cold start: set sequence to %d\n", body.UpdateSequence)
 	return nil
 }

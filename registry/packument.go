@@ -1,4 +1,4 @@
-package couch
+package registry
 
 import (
 	"context"
@@ -187,17 +187,17 @@ func (packument *Packument) Latest() *PackageVersion {
 // retrieves the full packument and returns an unmarshalled
 // Packument struct.
 // Equivalent to GETing https://registry.npmjs.com/{package}
-func (f *Follower) GetPackument(ctx context.Context, c *CouchDocumentChange) (*Packument, error) {
-	body, err := f.FetchPackument(ctx, c.ID)
+func (c *RegistryClient) GetPackument(ctx context.Context, id string) (*Packument, error) {
+	body, err := c.FetchPackument(ctx, id)
 
 	if err != nil {
-		return nil, fmt.Errorf("fetching packument for %s: %w", c.ID, err)
+		return nil, fmt.Errorf("fetching packument for %s: %w", id, err)
 	}
 	defer body.Close()
 	var packument Packument
 	err = json.NewDecoder(body).Decode(&packument)
 	if err != nil {
-		return nil, fmt.Errorf("unmarshalling packument for %s: %w", c.ID, err)
+		return nil, fmt.Errorf("unmarshalling packument for %s: %w", id, err)
 	}
 
 	return &packument, nil
@@ -205,13 +205,13 @@ func (f *Follower) GetPackument(ctx context.Context, c *CouchDocumentChange) (*P
 
 // fetches the Packument for a given package name.
 // retuns an io.ReadCloser for decoding or reading.
-func (f *Follower) FetchPackument(ctx context.Context, id string) (io.ReadCloser, error) {
+func (c *RegistryClient) FetchPackument(ctx context.Context, id string) (io.ReadCloser, error) {
 	packageName := url.PathEscape(id)
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://registry.npmjs.com/"+packageName, nil)
 	if err != nil {
 		return nil, fmt.Errorf("packument fetch: `%s`: creating request: %w", packageName, err)
 	}
-	res, err := f.Client.Do(req)
+	res, err := c.Client.Do(req)
 
 	if err != nil {
 		return nil, fmt.Errorf("packument fetch: `%s`: performing request: %w", packageName, err)
@@ -227,29 +227,29 @@ func (f *Follower) FetchPackument(ctx context.Context, id string) (io.ReadCloser
 
 // returns an unmarshalled Package Version manifest. This is
 // equivalent to getting https://registry.npmjs.com/{package}/latest
-func (f *Follower) GetLatestVersionManifest(ctx context.Context, c *CouchDocumentChange) (*PackageVersion, error) {
-	body, err := f.FetchLatestVersionManifest(ctx, c.ID)
+func (c *RegistryClient) GetLatestVersionManifest(ctx context.Context, id string) (*PackageVersion, error) {
+	body, err := c.FetchLatestVersionManifest(ctx, id)
 	if err != nil {
-		return nil, fmt.Errorf("fetching latest for %s: %w", c.ID, err)
+		return nil, fmt.Errorf("fetching latest for %s: %w", id, err)
 	}
 	defer body.Close()
 	var manifest PackageVersion
 	err = json.NewDecoder(body).Decode(&manifest)
 	if err != nil {
-		return nil, fmt.Errorf("unmarshalling manifest for %s: %w", c.ID, err)
+		return nil, fmt.Errorf("unmarshalling manifest for %s: %w", id, err)
 	}
 	return &manifest, nil
 }
 
 // fetches the latest version manifest for a given package name.
 // retuns an io.ReadCloser for decoding or reading.
-func (f *Follower) FetchLatestVersionManifest(ctx context.Context, id string) (io.ReadCloser, error) {
+func (c *RegistryClient) FetchLatestVersionManifest(ctx context.Context, id string) (io.ReadCloser, error) {
 	packageName := url.PathEscape(id)
 	req, err := http.NewRequestWithContext(ctx, "GET", "https://registry.npmjs.com/"+packageName+"/latest", nil)
 	if err != nil {
 		return nil, fmt.Errorf("latest fetch: `%s`: creating request: %w", packageName, err)
 	}
-	res, err := f.Client.Do(req)
+	res, err := c.Client.Do(req)
 
 	if err != nil {
 		return nil, fmt.Errorf("latest fetch: `%s`: performing request: %w", packageName, err)

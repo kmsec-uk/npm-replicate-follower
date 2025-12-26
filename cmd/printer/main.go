@@ -14,6 +14,10 @@ func main() {
 	log.Println("hello from the printer")
 	// create the follower
 	f := couch.NewFollower().WithPollingInterval(5 * time.Second)
+
+	// the underlying registry.Client can also be configured.
+	f.WithUserAgent("hello-registry").WithHTTPTimeout(0 * time.Second)
+
 	// connect and start receiving changes from the channel
 
 	var wg sync.WaitGroup
@@ -39,7 +43,7 @@ func main() {
 				return
 			}
 			// get full packument details
-			p, err := f.GetPackument(ctx, &event.Change)
+			p, err := f.GetPackument(ctx, event.Change.ID)
 			if err != nil {
 				log.Printf("%s: error getting packument: %v\n", event.Change.ID, err)
 				return
